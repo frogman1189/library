@@ -72,12 +72,46 @@ CREATE TABLE owner_history (
 );
 
 --------------------------------------------------------------------------------
+-- Functions
+--------------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION issue_book(_book_id book_id_t, _person_id person_id_t)
+RETURNS NULL
+LANGUAGE sql
+AS $$
+SELECT
+
+
+--------------------------------------------------------------------------------
+-- Views
+--------------------------------------------------------------------------------
+
+CREATE OR REPLACE VIEW available_books AS SELECT
+--p.f_name || ' ' || p.l_name as owner,
+b.title,
+b.author
+FROM book b LEFT JOIN person p
+ON(b.cur_owner = p.person_id)
+WHERE b.state = 'available';
+
+SELECT * FROM available_books;
+
+CREATE OR REPLACE VIEW borrowed_books AS SELECT
+p.f_name || ' ' || p.l_name as borrower,
+b.title,
+b.author
+FROM book b JOIN person p
+ON(b.cur_borrower = p.person_id)
+WHERE b.state = 'borrowed';
+
+SELECT * FROM borrowed_books;
+--------------------------------------------------------------------------------
 -- Fill With Values
 --------------------------------------------------------------------------------
 
 INSERT INTO book (isbn, copies, state, title, author, description, cur_borrower, cur_owner)
 VALUES
-       (9780375843679, 1, 'available', 'Brain Jack', 'Brian Falkner', null, null, null)
+--       (9780375843679, 1, 'available', 'Brain Jack', 'Brian Falkner', null, null, null)
+       (9780752866505, 1, 'available', 'Asterix In Belgium', 'Rene Goscinny', null, null, null)
 ;
 
 INSERT INTO person (f_name, l_name, email, ph_number) VALUES
@@ -85,6 +119,12 @@ INSERT INTO person (f_name, l_name, email, ph_number) VALUES
        ('Holly', 'Warner', null, null)
 ;
 
+UPDATE book SET cur_owner = 1 WHERE book_id = 1;
+
+UPDATE book SET cur_borrower = 1 WHERE book_id = 2;
+UPDATE book SET state = 'borrowed' WHERE book_id = 2;
+
+INSERT INTO book
 --------------------------------------------------------------------------------
 -- Alterations made to ddl
 --------------------------------------------------------------------------------
