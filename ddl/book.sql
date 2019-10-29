@@ -10,12 +10,26 @@ CREATE TYPE book_status_t AS ENUM(
        'available',
        'revoked'
 );
+CREATE SEQUENCE book_id_sequence
+  start 1
+  increment 1
+;
+CREATE SEQUENCE person_id_sequence
+  start 1
+  increment 1
+;
+
+CREATE DOMAIN isbn_t AS varchar(16)
+  CHECK(
+    VALUE ~ '^\d{9}[\dX]?[\dX]?[\dX][\dX]?$'
+);
+
 CREATE DOMAIN book_id_t AS int;
 CREATE DOMAIN person_id_t AS int;
 CREATE DOMAIN ph_number_t AS varchar(32);
 
 CREATE TABLE person (
-       person_id person_id_t NOT NULL,
+       person_id person_id_t DEFAULT nextval('person_id_sequence') NOT NULL,
        f_name varchar(128),
        l_name varchar(128),
        email varchar(128),
@@ -24,11 +38,12 @@ CREATE TABLE person (
 );
 
 CREATE TABLE book (
-       book_id book_id_t NOT NULL,
-       isbn int,
+       book_id book_id_t DEFAULT nextval('book_id_sequence') NOT NULL,
+       isbn isbn_t,
        copies int NOT NULL,
        state book_status_t NOT NULL,
        title varchar(256) NOT NULL,
+       author varchar(128),
        description varchar(8192),
        cur_borrower person_id_t,
        cur_owner person_id_t,
@@ -60,11 +75,23 @@ CREATE TABLE owner_history (
 -- Fill With Values
 --------------------------------------------------------------------------------
 
-INSERT INTO book VALUES (
-       0, null, 1, 'available', 'postgres: the new art'
-, null, null, null)
+INSERT INTO book (isbn, copies, state, title, author, description, cur_borrower, cur_owner)
+VALUES
+       (9780375843679, 1, 'available', 'Brain Jack', 'Brian Falkner', null, null, null)
 ;
 
-INSERT INTO person VALUES (
-       0, 'Logan', 'Warner', 'frogman1189@gmail.com', '0220489876'
-);
+INSERT INTO person (f_name, l_name, email, ph_number) VALUES
+       ('Logan', 'Warner', 'frogman1189@gmail.com', '0220489876')
+       ('Holly', 'Warner', null, null)
+;
+
+--------------------------------------------------------------------------------
+-- Alterations made to ddl
+--------------------------------------------------------------------------------
+ALTER TABLE book
+  ADD COLUMN author varchar(128)
+;
+
+ALTER TABLE book
+  ALTER COLUMN isbn SET DATA TYPE isbn_t;
+
