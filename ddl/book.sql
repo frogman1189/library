@@ -10,6 +10,7 @@ CREATE TYPE book_status_t AS ENUM(
        'available',
        'revoked'
 );
+
 CREATE SEQUENCE book_id_sequence
   start 1
   increment 1
@@ -53,9 +54,9 @@ CREATE TABLE book (
 );
 
 CREATE TABLE borrow_history (
-       person_id person_id_t,
-       book_id book_id_t,
-       borrow_date date,
+       person_id person_id_t NOT NULL,
+       book_id book_id_t NOT NULL,
+       borrow_date date DEFAULT current_date NOT NULL,
        return_date date,
        PRIMARY KEY(person_id, book_id, borrow_date),
        FOREIGN KEY(person_id) REFERENCES person(person_id) ON UPDATE CASCADE ON DELETE CASCADE,
@@ -63,9 +64,9 @@ CREATE TABLE borrow_history (
 );
 
 CREATE TABLE owner_history (
-       person_id person_id_t,
-       book_id book_id_t,
-       date_owned date,
+       person_id person_id_t NOT NULL,
+       book_id book_id_t NOT NULL,
+       date_owned date DEFAULT current_date NOT NULL,
        PRIMARY KEY (person_id, book_id, date_owned),
        FOREIGN KEY (person_id) REFERENCES person(person_id) ON DELETE CASCADE ON UPDATE CASCADE,
        FOREIGN KEY (book_id) REFERENCES book(book_id) ON DELETE CASCADE ON UPDATE CASCADE
@@ -74,12 +75,48 @@ CREATE TABLE owner_history (
 --------------------------------------------------------------------------------
 -- Functions
 --------------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION issue_book(_book_id book_id_t, _person_id person_id_t)
-RETURNS NULL
-LANGUAGE sql
+CREATE OR REPLACE FUNCTION issue_book(_person_id person_id_t, _book_id book_id_t)
+RETURNS bool
+SET SEARCH_PATH = book
 AS $$
-SELECT
+DECLARE
+  _cur_state  book_status_t;
+BEGIN
+  SELECT state INTO _cur_state FROM book WHERE book_id = _book_id;
+  IF _cur_state = 'available' THEN
+    UPDATE book SET state = 'borrowed',
+      cur_borrower = _person_id
+      WHERE book_id = _book_id;
+    INSERT INTO borrow_history (person_id, book_id)
+      VALUES (_person_id, _book_id);
+    RETURN true;
+  ELSE
+    RAISE NOTICE 'book is not available';
+      return false;
+  END IF;
+END;
+$$ LANGUAGE plpgsql;
 
+CREATE OR REPLACE FUNCTION return_book(_book_id book_id_t)
+RETURNS bool
+SET SEARCH_PATH = book
+AS $$
+DECLARE
+  _cur_state  book_status_t;
+BEGIN
+  SELECT state INTO _cur_state FROM book WHERE book_id = _book_id;
+  IF _cur_state = 'borrowed' THEN
+    UPDATE book SET state = 'available' WHERE book_id = _book_id;
+    UPDATE borrow_history SET return_date = current_date
+      WHERE book_id = _book_id
+      AND   return_date IS NULL;
+    RETURN true;
+  ELSE
+    RAISE NOTICE 'book is not borrowed currently';
+    RETURN false;
+  END IF;
+END;
+$$ LANGUAGE plpgsql;
 
 --------------------------------------------------------------------------------
 -- Views
@@ -104,19 +141,36 @@ ON(b.cur_borrower = p.person_id)
 WHERE b.state = 'borrowed';
 
 SELECT * FROM borrowed_books;
+
+CREATE OR REPLACE VIEW book_owners AS
+SELECT
+b.book_id,
+b.title,
+b.author,
+p.f_name || ' ' || p.l_name as name
+FROM book b, person p
+WHERE b.cur_owner = p.person_id;
+
+--------------------------------------------------------------------------------
+-- Useful SELECTS
+--------------------------------------------------------------------------------
+
+SELECT book_id, title, author, state FROM book ORDER BY book_id;
+
 --------------------------------------------------------------------------------
 -- Fill With Values
 --------------------------------------------------------------------------------
 
 INSERT INTO book (isbn, copies, state, title, author, description, cur_borrower, cur_owner)
 VALUES
---       (9780375843679, 1, 'available', 'Brain Jack', 'Brian Falkner', null, null, null)
+       (9780375843679, 1, 'available', 'Brain Jack', 'Brian Falkner', null, null, null),
        (9780752866505, 1, 'available', 'Asterix In Belgium', 'Rene Goscinny', null, null, null)
 ;
 
 INSERT INTO person (f_name, l_name, email, ph_number) VALUES
-       ('Logan', 'Warner', 'frogman1189@gmail.com', '0220489876')
-       ('Holly', 'Warner', null, null)
+       ('Logan', 'Warner', 'frogman1189@gmail.com', '0220489876'),
+       ('Holly', 'Warner', null, null),
+       ('Ashton', 'Warner', 'drflamemontgomery@gmail.com', null)
 ;
 
 UPDATE book SET cur_owner = 1 WHERE book_id = 1;
