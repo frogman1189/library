@@ -21,26 +21,27 @@ CREATE DOMAIN ph_number_t AS varchar(32);
 
 CREATE TABLE person (
        person_id SERIAL,
-       f_name varchar(128),
-       l_name varchar(128),
-       email varchar(128),
-       ph_number varchar(32),
+       f_name text,
+       l_name text,
+       email text,
+       ph_number ph_number_t,
        PRIMARY KEY (person_id)
 );
 
-CREATE TABLE author (
+CREATE TABLE meta_data (
        isbn isbn_t,
-       author_name varchar(256),
-       PRIMARY KEY (isbn, author_name),
-       FOREIGN KEY (isbn) REFERENCES meta_data
+       title text,
+	   description text,
+	   publisher text,
+       PRIMARY KEY (isbn)
 );
 
-CREATE TABLE meta_data (
-       isbn isbn_t NOT NULL,
-       title varchar(256),
-	   description varchar(8092),
-	   publisher varchar(256)
-       PRIMARY KEY (isbn)
+
+CREATE TABLE author (
+       isbn isbn_t,
+       author_name text,
+       PRIMARY KEY (isbn, author_name),
+       FOREIGN KEY (isbn) REFERENCES meta_data
 );
 
 CREATE TABLE book (
@@ -104,8 +105,23 @@ meta_data_json = plpy.execute("SELECT gen.py_pgrest(%s);" % (plpy.quote_literal(
 json_object = json.loads(meta_data_json)['items'][0]['volumeInfo']
 #
 # Update Title
+title = None
+description = None
+publisher = None
+try:
+	title = json_object['title']
+except:
+	"""do nothing"""
+try:
+	description = json_object['description']
+except:
+	"""do nothing"""
+try:
+	publisher = json_object['publisher']
+except:
+	"""do nothing"""
 plpy.execute("UPDATE book.meta_data SET title = %s, description = %s, publisher = %s WHERE isbn = %s" %
-(plpy.quote_literal(json_object["title"]), plpy.quote_literal(json_object['description']), plpy.quote_literal(json_object['publisher']), plpy.quote_literal(_isbn)))
+(plpy.quote_literal(title), plpy.quote_literal(title), plpy.quote_literal(title), plpy.quote_literal(_isbn)))
 #
 # Update Authors
 for author in json_object['authors']:
@@ -126,13 +142,16 @@ $$
 ;
 
 CREATE OR REPLACE FUNCTION add_book(_isbn text)
-  RETURNS text
+  RETURNS TABLE (isbn isbn_t, title text, author text[], publisher text, description text)
   LANGUAGE plpgsql
 AS $$
    BEGIN
-   INSERT INTO book.meta_data VALUES (_isbn, null);
-   RETURN book.get_meta_data(_isbn);
---	 RETURN true;
+   IF (SELECT b.isbn FROM book.meta_data b WHERE b.isbn = _isbn) IS NULL THEN
+	INSERT INTO book.meta_data VALUES (_isbn, null);
+   END IF;
+   INSERT INTO book.book (isbn, state) VALUES (_isbn, 'available');
+   PERFORM book.get_meta_data(_isbn);
+   RETURN QUERY SELECT * FROM book.book_overview asd WHERE asd.isbn = _isbn;
    END;
 $$;
 
@@ -206,25 +225,15 @@ array_agg(author_name) as author
 FROM author
 GROUP BY isbn;
 
-CREATE OR REPLACE VIEW subject_agg AS SELECT
-isbn,
-array_agg(subject_name) as subject
-FROM subject
-GROUP BY isbn;
-
 CREATE OR REPLACE VIEW book_overview AS SELECT
 m.isbn,
 m.title,
 a.author,
-p.publisher,
-e.excerpt,
-s.subject
+m.publisher,
+m.description
 FROM meta_data m
 JOIN author_agg a ON (m.isbn = a.isbn)
-JOIN publisher_agg p ON (m.isbn = p.isbn)
-LEFT JOIN excerpt_agg e ON (m.isbn = e.isbn)
-RIGHT JOIN subject_agg s ON (m.isbn = s.isbn)
-GROUP BY m.isbn, a.author, p.publisher, e.excerpt, s.subject;
+GROUP BY m.isbn, a.author;
 
 CREATE OR REPLACE VIEW available_books AS SELECT
 --p.f_name || ' ' || p.l_name as owner,
