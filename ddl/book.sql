@@ -35,30 +35,11 @@ CREATE TABLE author (
        FOREIGN KEY (isbn) REFERENCES meta_data
 );
 
-CREATE TABLE subject (
-	   isbn isbn_t,
-	   subject_name varchar(64),
-	   PRIMARY KEY(isbn, subject_name),
-	   FOREIGN KEY (isbn) REFERENCES meta_data
-);
-
-CREATE TABLE publisher (
-	   isbn isbn_t,
-       publisher_name varchar(256),
-       PRIMARY KEY(isbn, publisher_name),
-	   FOREIGN KEY (isbn) REFERENCES meta_data
-);
-
-CREATE TABLE excerpt (
-	   isbn isbn_t,
-	   excerpt varchar(8092),
-	   PRIMARY KEY (isbn, excerpt),
-	   FOREIGN KEY (isbn) REFERENCES meta_data
-);
-
 CREATE TABLE meta_data (
        isbn isbn_t NOT NULL,
        title varchar(256),
+	   description varchar(8092),
+	   publisher varchar(256)
        PRIMARY KEY (isbn)
 );
 
@@ -116,50 +97,29 @@ CREATE OR REPLACE FUNCTION get_meta_data(_isbn text)
   LANGUAGE plpython3u
 AS $$
 import json
-url = 'https://openlibrary.org/api/books?bibkeys=ISBN:' + (
-    _isbn + '&jscmd=data')
+url = 'https://www.googleapis.com/books/v1/volumes?q=isbn:' + _isbn
 meta_data_json = plpy.execute("SELECT gen.py_pgrest(%s);" % (plpy.quote_literal(url)))[0]['py_pgrest']
 #
 # remove garbage from api and convert to json object
-json_object = json.loads(meta_data_json[18:-1])['ISBN:' + _isbn]
+json_object = json.loads(meta_data_json)['items'][0]['volumeInfo']
 #
 # Update Title
-#try:
-plpy.execute("UPDATE book.meta_data SET title = %s WHERE isbn = %s" %
-(plpy.quote_literal(json_object["title"]), plpy.quote_literal(_isbn)))
+plpy.execute("UPDATE book.meta_data SET title = %s, description = %s, publisher = %s WHERE isbn = %s" %
+(plpy.quote_literal(json_object["title"]), plpy.quote_literal(json_object['description']), plpy.quote_literal(json_object['publisher']), plpy.quote_literal(_isbn)))
 #
 # Update Authors
 for author in json_object['authors']:
     try:
         plpy.execute("INSERT INTO book.author VALUES (%s, %s)" %
-        (plpy.quote_literal(_isbn), plpy.quote_literal(author['name'])))
+        (plpy.quote_literal(_isbn), plpy.quote_literal(author)))
     except:
         """do nothing"""
-#
-# Update publishers
-for publisher in json_object['publishers']:
-    try:
-        plpy.execute("INSERT INTO book.publisher VALUES (%s, %s)" %
-        (plpy.quote_literal(_isbn), plpy.quote_literal(publisher['name'])))
-    except:
-        """do nothing"""
-    #
-    # Update Subjects
-    for subject in json_object['subjects']:
-        try:
-            plpy.execute("INSERT INTO book.subject VALUES (%s, %s)" %
-            (plpy.quote_literal(_isbn), plpy.quote_literal(subject['name'])))
-        except:
-            """do nothing"""
-    # Update excerpts
-if 'excerpts' in json_object.keys():
-    for excerpt in json_object['excerpts']:
-        try:
-            plpy.execute("INSERT INTO book.excerpts VALUES (%s, %s)" %
-            (plpy.quote_literal(_isbn), plpy.quote_literal(excerpt['text'])))
-        except:
-            """do nothing"""
-return 'asd'
+try:
+    plpy.execute("INSERT INTO book.me VALUES (%s, %s)" %
+    (plpy.quote_literal(_isbn), plpy.quote_literal(author)))
+except:
+    """do nothing"""
+return ''
 #except:
 #    return ''
 $$
@@ -171,7 +131,7 @@ CREATE OR REPLACE FUNCTION add_book(_isbn text)
 AS $$
    BEGIN
    INSERT INTO book.meta_data VALUES (_isbn, null);
-   RETURN get_meta_data(_isbn);
+   RETURN book.get_meta_data(_isbn);
 --	 RETURN true;
    END;
 $$;
@@ -242,41 +202,29 @@ AND   m.isbn = s.isbn;*/
 
 CREATE OR REPLACE VIEW author_agg AS SELECT
 isbn,
-array_agg(author_name) as name
+array_agg(author_name) as author
 FROM author
 GROUP BY isbn;
 
-CREATE OR REPLACE VIEW publisher_agg AS SELECT
+CREATE OR REPLACE VIEW subject_agg AS SELECT
 isbn,
-array_agg(publisher_name) as name
-FROM publisher
-GROUP BY isbn;
-
-CREATE OR REPLACE VIEW excerpt_agg AS SELECT
-isbn,
-array_agg(excerpt) as excerpt
-FROM excerpt
-GROUP BY isbn;
-
-CREATE OR REPLACE VIEW publisher_agg AS SELECT
-isbn,
-array_agg(publisher_name) as name
-FROM publisher
+array_agg(subject_name) as subject
+FROM subject
 GROUP BY isbn;
 
 CREATE OR REPLACE VIEW book_overview AS SELECT
 m.isbn,
 m.title,
-array_agg(a.author_name) as authors,
-array_agg(p.publisher_name) as publishers,
-array_agg(e.excerpt) as descriptions,
-array_agg(subject_name) as subjects
+a.author,
+p.publisher,
+e.excerpt,
+s.subject
 FROM meta_data m
-JOIN author a ON (m.isbn = a.isbn)
-JOIN publisher p ON (m.isbn = p.isbn)
-LEFT JOIN excerpts e ON (m.isbn = e.isbn)
-RIGHT JOIN subject s ON (m.isbn = s.isbn)
-GROUP BY m.isbn, a.author_name, p.publisher_name, e.excerpt;
+JOIN author_agg a ON (m.isbn = a.isbn)
+JOIN publisher_agg p ON (m.isbn = p.isbn)
+LEFT JOIN excerpt_agg e ON (m.isbn = e.isbn)
+RIGHT JOIN subject_agg s ON (m.isbn = s.isbn)
+GROUP BY m.isbn, a.author, p.publisher, e.excerpt, s.subject;
 
 CREATE OR REPLACE VIEW available_books AS SELECT
 --p.f_name || ' ' || p.l_name as owner,
