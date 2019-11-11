@@ -1,6 +1,7 @@
 -- -*- mode: sql; sql-product: postgres; -*-
 
 CREATE SCHEMA IF NOT EXISTS book;
+
 SET search_path = book;
 
 CREATE TYPE book_status_t AS ENUM(
@@ -11,26 +12,15 @@ CREATE TYPE book_status_t AS ENUM(
        'revoked'
 );
 
-CREATE SEQUENCE book_id_sequence
-  start 1
-  increment 1
-;
-CREATE SEQUENCE person_id_sequence
-  start 1
-  increment 1
-;
-
 CREATE DOMAIN isbn_t AS varchar(16)
   CHECK(
     VALUE ~ '^\d{9}[\dX]?[\dX]?[\dX][\dX]?$'
 );
 
-CREATE DOMAIN book_id_t AS int;
-CREATE DOMAIN person_id_t AS int;
 CREATE DOMAIN ph_number_t AS varchar(32);
 
 CREATE TABLE person (
-       person_id person_id_t DEFAULT nextval('person_id_sequence') NOT NULL,
+       person_id SERIAL,
        f_name varchar(128),
        l_name varchar(128),
        email varchar(128),
@@ -38,44 +28,156 @@ CREATE TABLE person (
        PRIMARY KEY (person_id)
 );
 
-CREATE TABLE book (
-       book_id book_id_t DEFAULT nextval('book_id_sequence') NOT NULL,
+CREATE TABLE author (
        isbn isbn_t,
-       copies int NOT NULL,
-       state book_status_t NOT NULL,
-       title varchar(256) NOT NULL,
-       author varchar(128),
-       description varchar(8192),
-       cur_borrower person_id_t,
-       cur_owner person_id_t,
-       PRIMARY KEY (book_id),
-       FOREIGN KEY (cur_borrower) REFERENCES person(person_id),
-       FOREIGN KEY (cur_owner) REFERENCES person(person_id)
+       author_name varchar(256),
+       PRIMARY KEY (isbn, author_name),
+       FOREIGN KEY (isbn) REFERENCES meta_data
 );
 
-CREATE TABLE borrow_history (
-       person_id person_id_t NOT NULL,
-       book_id book_id_t NOT NULL,
+CREATE TABLE subject (
+	   isbn isbn_t,
+	   subject_name varchar(64),
+	   PRIMARY KEY(isbn, subject_name),
+	   FOREIGN KEY (isbn) REFERENCES meta_data
+);
+
+CREATE TABLE publisher (
+	   isbn isbn_t,
+       publisher_name varchar(256),
+       PRIMARY KEY(isbn, publisher_name),
+	   FOREIGN KEY (isbn) REFERENCES meta_data
+);
+
+CREATE TABLE excerpt (
+	   isbn isbn_t,
+	   excerpt varchar(8092),
+	   PRIMARY KEY (isbn, excerpt),
+	   FOREIGN KEY (isbn) REFERENCES meta_data
+);
+
+CREATE TABLE meta_data (
+       isbn isbn_t NOT NULL,
+       title varchar(256),
+       PRIMARY KEY (isbn)
+);
+
+CREATE TABLE book (
+       book_id SERIAL,
+       isbn isbn_t NOT NULL,
+       state book_status_t NOT NULL,
+       PRIMARY KEY (book_id),
+       FOREIGN KEY (isbn) REFERENCES meta_data
+         ON DELETE CASCADE
+);
+
+CREATE TABLE borrowers_table (
+       borrowed_book_id SERIAL,
+       person_id SERIAL,
+       book_id SERIAL,
        borrow_date date DEFAULT current_date NOT NULL,
        return_date date,
        PRIMARY KEY(person_id, book_id, borrow_date),
-       FOREIGN KEY(person_id) REFERENCES person(person_id) ON UPDATE CASCADE ON DELETE CASCADE,
-       FOREIGN KEY(book_id) REFERENCES book(book_id) ON UPDATE CASCADE ON DELETE CASCADE
+       FOREIGN KEY(person_id) REFERENCES person(person_id)
+         ON UPDATE CASCADE ON DELETE CASCADE,
+       FOREIGN KEY(book_id) REFERENCES book(book_id)
+         ON UPDATE CASCADE ON DELETE CASCADE
 );
 
-CREATE TABLE owner_history (
-       person_id person_id_t NOT NULL,
-       book_id book_id_t NOT NULL,
-       date_owned date DEFAULT current_date NOT NULL,
-       PRIMARY KEY (person_id, book_id, date_owned),
-       FOREIGN KEY (person_id) REFERENCES person(person_id) ON DELETE CASCADE ON UPDATE CASCADE,
-       FOREIGN KEY (book_id) REFERENCES book(book_id) ON DELETE CASCADE ON UPDATE CASCADE
+/***************************** 
+ * keeps track of ownership of a certain book isbn
+ * it does not distinguish between specific book if there is
+ * more than one of that type, but does say how many of that
+ * type of book the person owns
+ * also it only keeps a record of when the first book of that isbn was
+ * obtained, and only when the last one was released does it update
+ * date_released.
+ *****************************/
+
+CREATE TABLE ownership_table (
+       person_id SERIAL NOT NULL,
+       isbn isbn_t NOT NULL,
+       copies int,
+       date_obtained date DEFAULT current_date NOT NULL, 
+       date_released date,
+       PRIMARY KEY (person_id, isbn, date_obtained),
+       FOREIGN KEY (person_id) REFERENCES person(person_id)
+         ON DELETE CASCADE ON UPDATE CASCADE,
+       FOREIGN KEY (isbn) REFERENCES meta_data(isbn)
+         ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 --------------------------------------------------------------------------------
 -- Functions
 --------------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION issue_book(_person_id person_id_t, _book_id book_id_t)
+
+CREATE OR REPLACE FUNCTION get_meta_data(_isbn text)
+  RETURNS text
+  LANGUAGE plpython3u
+AS $$
+import json
+url = 'https://openlibrary.org/api/books?bibkeys=ISBN:' + (
+    _isbn + '&jscmd=data')
+meta_data_json = plpy.execute("SELECT gen.py_pgrest(%s);" % (plpy.quote_literal(url)))[0]['py_pgrest']
+#
+# remove garbage from api and convert to json object
+json_object = json.loads(meta_data_json[18:-1])['ISBN:' + _isbn]
+#
+# Update Title
+#try:
+plpy.execute("UPDATE book.meta_data SET title = %s WHERE isbn = %s" %
+(plpy.quote_literal(json_object["title"]), plpy.quote_literal(_isbn)))
+#
+# Update Authors
+for author in json_object['authors']:
+    try:
+        plpy.execute("INSERT INTO book.author VALUES (%s, %s)" %
+        (plpy.quote_literal(_isbn), plpy.quote_literal(author['name'])))
+    except:
+        """do nothing"""
+#
+# Update publishers
+for publisher in json_object['publishers']:
+    try:
+        plpy.execute("INSERT INTO book.publisher VALUES (%s, %s)" %
+        (plpy.quote_literal(_isbn), plpy.quote_literal(publisher['name'])))
+    except:
+        """do nothing"""
+    #
+    # Update Subjects
+    for subject in json_object['subjects']:
+        try:
+            plpy.execute("INSERT INTO book.subject VALUES (%s, %s)" %
+            (plpy.quote_literal(_isbn), plpy.quote_literal(subject['name'])))
+        except:
+            """do nothing"""
+    # Update excerpts
+if 'excerpts' in json_object.keys():
+    for excerpt in json_object['excerpts']:
+        try:
+            plpy.execute("INSERT INTO book.excerpts VALUES (%s, %s)" %
+            (plpy.quote_literal(_isbn), plpy.quote_literal(excerpt['text'])))
+        except:
+            """do nothing"""
+return 'asd'
+#except:
+#    return ''
+$$
+;
+
+CREATE OR REPLACE FUNCTION add_book(_isbn text)
+  RETURNS text
+  LANGUAGE plpgsql
+AS $$
+   BEGIN
+   INSERT INTO book.meta_data VALUES (_isbn, null);
+   RETURN get_meta_data(_isbn);
+--	 RETURN true;
+   END;
+$$;
+
+
+/*CREATE OR REPLACE FUNCTION issue_book(_person_id person_id_t, _book_id book_id_t)
 RETURNS bool
 SET SEARCH_PATH = book
 AS $$
@@ -118,9 +220,63 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+CREATE OR REPLACE FUNCTION add_book(_isbn isbn_t)
+RETURNS */
+
 --------------------------------------------------------------------------------
 -- Views
 --------------------------------------------------------------------------------
+
+/*CREATE OR REPLACE VIEW book_overview AS SELECT
+m.isbn,
+m.title,
+a.author_name,
+p.publisher_name,
+e.excerpt,
+s.subject_name
+FROM meta_data m, author a, publisher p, excerpts e, subject s
+WHERE m.isbn = a.isbn
+AND   m.isbn = p.isbn
+AND   m.isbn = e.isbn
+AND   m.isbn = s.isbn;*/
+
+CREATE OR REPLACE VIEW author_agg AS SELECT
+isbn,
+array_agg(author_name) as name
+FROM author
+GROUP BY isbn;
+
+CREATE OR REPLACE VIEW publisher_agg AS SELECT
+isbn,
+array_agg(publisher_name) as name
+FROM publisher
+GROUP BY isbn;
+
+CREATE OR REPLACE VIEW excerpt_agg AS SELECT
+isbn,
+array_agg(excerpt) as excerpt
+FROM excerpt
+GROUP BY isbn;
+
+CREATE OR REPLACE VIEW publisher_agg AS SELECT
+isbn,
+array_agg(publisher_name) as name
+FROM publisher
+GROUP BY isbn;
+
+CREATE OR REPLACE VIEW book_overview AS SELECT
+m.isbn,
+m.title,
+array_agg(a.author_name) as authors,
+array_agg(p.publisher_name) as publishers,
+array_agg(e.excerpt) as descriptions,
+array_agg(subject_name) as subjects
+FROM meta_data m
+JOIN author a ON (m.isbn = a.isbn)
+JOIN publisher p ON (m.isbn = p.isbn)
+LEFT JOIN excerpts e ON (m.isbn = e.isbn)
+RIGHT JOIN subject s ON (m.isbn = s.isbn)
+GROUP BY m.isbn, a.author_name, p.publisher_name, e.excerpt;
 
 CREATE OR REPLACE VIEW available_books AS SELECT
 --p.f_name || ' ' || p.l_name as owner,
@@ -140,7 +296,6 @@ FROM book b JOIN person p
 ON(b.cur_borrower = p.person_id)
 WHERE b.state = 'borrowed';
 
-SELECT * FROM borrowed_books;
 
 CREATE OR REPLACE VIEW book_owners AS
 SELECT
@@ -150,42 +305,3 @@ b.author,
 p.f_name || ' ' || p.l_name as name
 FROM book b, person p
 WHERE b.cur_owner = p.person_id;
-
---------------------------------------------------------------------------------
--- Useful SELECTS
---------------------------------------------------------------------------------
-
-SELECT book_id, title, author, state FROM book ORDER BY book_id;
-
---------------------------------------------------------------------------------
--- Fill With Values
---------------------------------------------------------------------------------
-
-INSERT INTO book (isbn, copies, state, title, author, description, cur_borrower, cur_owner)
-VALUES
-       (9780375843679, 1, 'available', 'Brain Jack', 'Brian Falkner', null, null, null),
-       (9780752866505, 1, 'available', 'Asterix In Belgium', 'Rene Goscinny', null, null, null)
-;
-
-INSERT INTO person (f_name, l_name, email, ph_number) VALUES
-       ('Logan', 'Warner', 'frogman1189@gmail.com', '0220489876'),
-       ('Holly', 'Warner', null, null),
-       ('Ashton', 'Warner', 'drflamemontgomery@gmail.com', null)
-;
-
-UPDATE book SET cur_owner = 1 WHERE book_id = 1;
-
-UPDATE book SET cur_borrower = 1 WHERE book_id = 2;
-UPDATE book SET state = 'borrowed' WHERE book_id = 2;
-
-INSERT INTO book
---------------------------------------------------------------------------------
--- Alterations made to ddl
---------------------------------------------------------------------------------
-ALTER TABLE book
-  ADD COLUMN author varchar(128)
-;
-
-ALTER TABLE book
-  ALTER COLUMN isbn SET DATA TYPE isbn_t;
-
