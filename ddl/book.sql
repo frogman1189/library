@@ -1,5 +1,12 @@
 -- -*- mode: sql; sql-product: postgres; -*-
 
+
+-- NOTE: need to add trigger to book so that if a book instance is
+-- removed it is removed from one of the owners - as typically there
+-- will only be one book and owner this should typically not cause
+-- problems. When there is more than one then problems can occur, but
+-- only in traceability in saying that the one that was removed was
+-- definately this persons.
 CREATE SCHEMA IF NOT EXISTS book;
 
 SET search_path = book;
@@ -33,6 +40,8 @@ CREATE TABLE meta_data (
        title text,
 	   description text,
 	   publisher text,
+	   cover_link text,
+	   cover_data bytea,
        PRIMARY KEY (isbn)
 );
 
@@ -54,16 +63,15 @@ CREATE TABLE book (
 );
 
 CREATE TABLE borrowers_table (
-       borrowed_book_id SERIAL,
-       person_id SERIAL,
        book_id SERIAL,
-       borrow_date date DEFAULT current_date NOT NULL,
-       return_date date,
+	   isbn isbn_t,
+       person_id SERIAL,
+       borrow_date timestamp DEFAULT current_timestamp NOT NULL,
+       return_date timestamp,
        PRIMARY KEY(person_id, book_id, borrow_date),
-       FOREIGN KEY(person_id) REFERENCES person(person_id)
-         ON UPDATE CASCADE ON DELETE CASCADE,
-       FOREIGN KEY(book_id) REFERENCES book(book_id)
-         ON UPDATE CASCADE ON DELETE CASCADE
+       FOREIGN KEY(person_id) REFERENCES person(person_id),
+       FOREIGN KEY(book_id) REFERENCES book(book_id),
+	   FOREIGN KEY(isbn) REFERENCES meta_data(isbn)
 );
 
 /***************************** 
@@ -80,8 +88,8 @@ CREATE TABLE ownership_table (
        person_id SERIAL NOT NULL,
        isbn isbn_t NOT NULL,
        copies int,
-       date_obtained date DEFAULT current_date NOT NULL, 
-       date_released date,
+       date_obtained timestamp DEFAULT current_timestamp NOT NULL, 
+       date_released timestamp,
        PRIMARY KEY (person_id, isbn, date_obtained),
        FOREIGN KEY (person_id) REFERENCES person(person_id)
          ON DELETE CASCADE ON UPDATE CASCADE,
@@ -97,7 +105,7 @@ CREATE OR REPLACE FUNCTION get_meta_data(_isbn text)
   RETURNS text
   LANGUAGE plpython3u
 AS $$
-import json
+import json, requests
 url = 'https://www.googleapis.com/books/v1/volumes?q=isbn:' + _isbn
 meta_data_json = plpy.execute("SELECT gen.py_pgrest(%s);" % (plpy.quote_literal(url)))[0]['py_pgrest']
 #
@@ -105,9 +113,11 @@ meta_data_json = plpy.execute("SELECT gen.py_pgrest(%s);" % (plpy.quote_literal(
 json_object = json.loads(meta_data_json)['items'][0]['volumeInfo']
 #
 # Update Title
-title = None
-description = None
-publisher = None
+title = ''
+description = ''
+publisher = ''
+cover_link = ''
+cover_data = ''
 try:
 	title = json_object['title']
 except:
@@ -120,8 +130,16 @@ try:
 	publisher = json_object['publisher']
 except:
 	"""do nothing"""
-plpy.execute("UPDATE book.meta_data SET title = %s, description = %s, publisher = %s WHERE isbn = %s" %
-(plpy.quote_literal(title), plpy.quote_literal(title), plpy.quote_literal(title), plpy.quote_literal(_isbn)))
+try:
+	cover_link = json_object['imageLinks']['thumbnail']
+except:
+	"""do nothing"""
+try:
+	cover_data = requests.request('GET', cover_link).content
+except:
+	"""do nothing"""
+plpy.execute("UPDATE book.meta_data SET title = %s, description = %s, publisher = %s, cover_link = %s WHERE isbn = %s" %
+(plpy.quote_literal(title), plpy.quote_literal(description), plpy.quote_literal(publisher), plpy.quote_literal(cover_link), plpy.quote_literal(_isbn)))
 #
 # Update Authors
 for author in json_object['authors']:
@@ -130,11 +148,6 @@ for author in json_object['authors']:
         (plpy.quote_literal(_isbn), plpy.quote_literal(author)))
     except:
         """do nothing"""
-try:
-    plpy.execute("INSERT INTO book.me VALUES (%s, %s)" %
-    (plpy.quote_literal(_isbn), plpy.quote_literal(author)))
-except:
-    """do nothing"""
 return ''
 #except:
 #    return ''
@@ -142,65 +155,36 @@ $$
 ;
 
 CREATE OR REPLACE FUNCTION add_book(_isbn text)
-  RETURNS TABLE (isbn isbn_t, title text, author text[], publisher text, description text)
+  RETURNS TABLE (isbn isbn_t, title text, author text[], publisher text, description text, cover_link text, cover_data bytea)
   LANGUAGE plpgsql
 AS $$
    BEGIN
    IF (SELECT b.isbn FROM book.meta_data b WHERE b.isbn = _isbn) IS NULL THEN
 	INSERT INTO book.meta_data VALUES (_isbn, null);
    END IF;
-   INSERT INTO book.book (isbn, state) VALUES (_isbn, 'available');
+   --INSERT INTO book.book (isbn, state) VALUES (_isbn, 'available');
    PERFORM book.get_meta_data(_isbn);
    RETURN QUERY SELECT * FROM book.book_overview asd WHERE asd.isbn = _isbn;
    END;
 $$;
 
+CREATE TRIGGER update_borrowers_table_isbn_trigger
+AFTER INSERT ON borrowers_table
+FOR EACH ROW
+EXECUTE PROCEDURE update_borrowers_table_isbn();
 
-/*CREATE OR REPLACE FUNCTION issue_book(_person_id person_id_t, _book_id book_id_t)
-RETURNS bool
-SET SEARCH_PATH = book
+CREATE OR REPLACE FUNCTION update_borrowers_table_isbn()
+RETURNS trigger
+LANGUAGE plpgsql set search_path = book
 AS $$
 DECLARE
-  _cur_state  book_status_t;
+_isbn isbn_t;
 BEGIN
-  SELECT state INTO _cur_state FROM book WHERE book_id = _book_id;
-  IF _cur_state = 'available' THEN
-    UPDATE book SET state = 'borrowed',
-      cur_borrower = _person_id
-      WHERE book_id = _book_id;
-    INSERT INTO borrow_history (person_id, book_id)
-      VALUES (_person_id, _book_id);
-    RETURN true;
-  ELSE
-    RAISE NOTICE 'book is not available';
-      return false;
-  END IF;
+SELECT isbn INTO _isbn FROM book WHERE book_id = NEW.book_id;
+UPDATE borrowers_table SET isbn = _isbn WHERE book_id = NEW.book_id;
+RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
-
-CREATE OR REPLACE FUNCTION return_book(_book_id book_id_t)
-RETURNS bool
-SET SEARCH_PATH = book
-AS $$
-DECLARE
-  _cur_state  book_status_t;
-BEGIN
-  SELECT state INTO _cur_state FROM book WHERE book_id = _book_id;
-  IF _cur_state = 'borrowed' THEN
-    UPDATE book SET state = 'available' WHERE book_id = _book_id;
-    UPDATE borrow_history SET return_date = current_date
-      WHERE book_id = _book_id
-      AND   return_date IS NULL;
-    RETURN true;
-  ELSE
-    RAISE NOTICE 'book is not borrowed currently';
-    RETURN false;
-  END IF;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE OR REPLACE FUNCTION add_book(_isbn isbn_t)
-RETURNS */
+$$;
 
 --------------------------------------------------------------------------------
 -- Views
@@ -230,7 +214,9 @@ m.isbn,
 m.title,
 a.author,
 m.publisher,
-m.description
+subString(m.description, 0, 100) as description,
+substring(m.cover_link, 0, 20) as cover_link,
+substring(m.cover_data, 0, 20) as cover_data
 FROM meta_data m
 JOIN author_agg a ON (m.isbn = a.isbn)
 GROUP BY m.isbn, a.author;
